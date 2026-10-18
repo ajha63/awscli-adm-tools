@@ -55,7 +55,7 @@ Catálogo de scripts desarrollados. Actualizar esta sección cada vez que se agr
 | Script | Módulo | Descripción | Parámetros principales |
 |--------|--------|-------------|------------------------|
 | Listar instancias | `aws_adm_script.ec2.list_instances` | Lista instancias EC2 en una región con Id, Name, State, Type y LaunchTime | `--region`, `--state`, `--profile` |
-| Consultar capacidad | `aws_adm_script.ec2.consulta_capacidad_ec2` | Consulta especificaciones y disponibilidad por zona de una familia o tipo de instancia EC2. Opcionalmente verifica capacidad real mediante dry-run. | `--tipoEC2`, `--region`, `--formato`, `--verificar-capacidad`, `--profile` |
+| Consultar capacidad | `aws_adm_script.ec2.consulta_capacidad_ec2` | Consulta la capacidad de una familia o tipo de instancia EC2 y realiza una verificación de capacidad real forzando una solicitud con DRY RUN por zona de disponibilidad. | `--tipoEC2`, `--region`, `--formato`, `--verificar-capacidad`, `--profile` |
 
 ---
 
@@ -63,7 +63,9 @@ Catálogo de scripts desarrollados. Actualizar esta sección cada vez que se agr
 
 **Propósito**
 
-Permite consultar, para una familia de instancias (ej. `m5`) o un tipo exacto (ej. `m5.large`):
+Consulta la capacidad de una familia de instancias (ej. `m5`) o un tipo exacto (ej. `m5.large`) y realiza una verificación de capacidad real forzando una solicitud con DRY RUN en cada zona de disponibilidad. El dry-run le indica a AWS que procese la solicitud completa sin materializar el recurso, lo que permite determinar si hay capacidad disponible en una zona antes de comprometerse con una reserva real.
+
+El script obtiene para cada tipo consultado:
 
 - Especificaciones técnicas: vCPUs, memoria (MiB), arquitecturas soportadas, rendimiento de red y almacenamiento local.
 - Zonas de disponibilidad donde el tipo está disponible en la región indicada.
