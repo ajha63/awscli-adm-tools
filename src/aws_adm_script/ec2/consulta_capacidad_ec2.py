@@ -1,124 +1,266 @@
 """
-EC2 — Consulta de capacidad disponible por tipo de instancia y región.
+EC2 — Consulta de capacidad e información de tipos de instancia por región.
 
 Uso:
-    uv run python -m aws_adm_script.ec2.consulta_capacidad_ec2
-    uv run python -m aws_adm_script.ec2.consulta_capacidad_ec2 --instance-type t3.medium --region us-east-1
+    uv run python -m aws_adm_script.ec2.consulta_capacidad_ec2 --region us-east-1 --tipoEC2 m5
+    uv run python -m aws_adm_script.ec2.consulta_capacidad_ec2 --tipoEC2 t3.medium --formato yaml
+    uv run python -m aws_adm_script.ec2.consulta_capacidad_ec2 --tipoEC2 m5.large --verificar-capacidad
+
+Parámetros:
+    --region              Región AWS (por defecto: us-east-1).
+    --tipoEC2             Familia (ej: m5) o tipo exacto (ej: m5.large). Requerido.
+    --formato             Formato de salida: json (por defecto) o yaml.
+    --verificar-capacidad Realiza un dry-run de create_capacity_reservation por zona
+                          para verificar capacidad real sin crear recursos.
+    --profile             Perfil AWS CLI (IAM Identity Center / SSO).
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import logging
 import sys
 from typing import Any
 
+import boto3
+import yaml
 from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_adm_script.utils.session import get_session, verify_identity
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Helpers de consulta
+# ---------------------------------------------------------------------------
 
-def consulta_capacidad(
-    session: Any,
-    instance_types: list[str] | None = None,
-) -> list[dict[str, Any]]:
+
+def _expandir_familia(ec2_client: Any, tipo_o_familia: str) -> list[str]:
     """
-    Consulta la capacidad disponible de tipos de instancia EC2 en la región de la sesión.
+    Dado un tipo exacto (ej: 'm5.large') o una familia (ej: 'm5'),
+    devuelve la lista de tipos de instancia que coinciden.
 
-    Usa describe_instance_type_offerings para verificar disponibilidad por zona
-    y describe_instance_types para obtener detalles de vCPU y memoria.
-
-    Args:
-        session:        Sesión boto3 activa.
-        instance_types: Lista de tipos a consultar (ej. ["t3.medium", "m5.large"]).
-                        None = todos los tipos disponibles.
-
-    Returns:
-        Lista de dicts con InstanceType, vCPUs, MemoryMiB y zonas disponibles.
+    Si el valor contiene '.' se asume tipo exacto y se retorna tal cual.
+    Si no, se usa el wildcard '<familia>.*' para obtener todos los tipos
+    de la familia via describe_instance_types con filtro de nombre.
     """
-    ec2 = session.client("ec2")
+    if "." in tipo_o_familia:
+        return [tipo_o_familia]
 
-    # --- Obtener zonas de disponibilidad por tipo ---
-    offerings_kwargs: dict[str, Any] = {"LocationType": "availability-zone"}
-    if instance_types:
-        offerings_kwargs["Filters"] = [{"Name": "instance-type", "Values": instance_types}]
+    # Es una familia: usar wildcard
+    paginator = ec2_client.get_paginator("describe_instance_types")
+    tipos: list[str] = []
+    for page in paginator.paginate(
+        Filters=[{"Name": "instance-type", "Values": [f"{tipo_o_familia}.*"]}]
+    ):
+        for item in page["InstanceTypes"]:
+            tipos.append(item["InstanceType"])
 
-    paginator = ec2.get_paginator("describe_instance_type_offerings")
-    zones_by_type: dict[str, list[str]] = {}
+    return sorted(tipos)
 
-    for page in paginator.paginate(**offerings_kwargs):
+
+def _obtener_especificaciones(
+    ec2_client: Any,
+    tipos: list[str],
+) -> dict[str, dict[str, Any]]:
+    """
+    Consulta describe_instance_types para los tipos indicados.
+    Retorna un dict {InstanceType -> specs_dict}.
+    """
+    specs: dict[str, dict[str, Any]] = {}
+
+    # La API acepta hasta 100 tipos por llamada
+    for i in range(0, len(tipos), 100):
+        chunk = tipos[i : i + 100]
+        response = ec2_client.describe_instance_types(InstanceTypes=chunk)
+        for item in response.get("InstanceTypes", []):
+            itype = item["InstanceType"]
+            specs[itype] = {
+                "vCPUs": item.get("VCpuInfo", {}).get("DefaultVCpus"),
+                "MemoriaMiB": item.get("MemoryInfo", {}).get("SizeInMiB"),
+                "Arquitecturas": item.get("ProcessorInfo", {}).get("SupportedArchitectures", []),
+                "RedGbps": item.get("NetworkInfo", {}).get("NetworkPerformance"),
+                "Almacenamiento": item.get("InstanceStorageInfo", {}).get("TotalSizeInGB"),
+            }
+
+    return specs
+
+
+def _obtener_zonas(
+    ec2_client: Any,
+    tipos: list[str],
+) -> dict[str, list[str]]:
+    """
+    Consulta describe_instance_type_offerings para obtener las zonas de
+    disponibilidad donde cada tipo de instancia está disponible.
+    Retorna {InstanceType -> [zona1, zona2, ...]}.
+    """
+    paginator = ec2_client.get_paginator("describe_instance_type_offerings")
+    zonas: dict[str, list[str]] = {}
+
+    for page in paginator.paginate(
+        LocationType="availability-zone",
+        Filters=[{"Name": "instance-type", "Values": tipos}],
+    ):
         for offering in page["InstanceTypeOfferings"]:
             itype = offering["InstanceType"]
-            zone = offering["Location"]
-            zones_by_type.setdefault(itype, []).append(zone)
+            zona = offering["Location"]
+            zonas.setdefault(itype, []).append(zona)
 
-    if not zones_by_type:
-        return []
-
-    # --- Obtener detalles de vCPU y memoria ---
-    types_to_describe = list(zones_by_type.keys())
-    details_kwargs: dict[str, Any] = {"InstanceTypes": types_to_describe}
-
-    response = ec2.describe_instance_types(**details_kwargs)
-    results: list[dict[str, Any]] = []
-
-    for item in response.get("InstanceTypes", []):
-        itype = item["InstanceType"]
-        vcpus = item.get("VCpuInfo", {}).get("DefaultVCpus", "—")
-        memory_mib = item.get("MemoryInfo", {}).get("SizeInMiB", "—")
-        zones = sorted(zones_by_type.get(itype, []))
-
-        results.append(
-            {
-                "InstanceType": itype,
-                "vCPUs": vcpus,
-                "MemoryMiB": memory_mib,
-                "ZonasDisponibles": ", ".join(zones),
-                "TotalZonas": len(zones),
-            }
-        )
-
-    # Ordenar por tipo de instancia
-    results.sort(key=lambda x: x["InstanceType"])
-    return results
+    return {k: sorted(v) for k, v in zonas.items()}
 
 
-def _print_table(results: list[dict[str, Any]]) -> None:
-    if not results:
-        print("No se encontraron tipos de instancia disponibles.")
-        return
+def _verificar_capacidad_por_zona(
+    ec2_client: Any,
+    tipo: str,
+    zonas: list[str],
+) -> dict[str, str]:
+    """
+    Para cada zona, intenta un dry-run de create_capacity_reservation con
+    InstanceCount=1. Esto NO crea ningún recurso; solo verifica si AWS
+    puede satisfacer la solicitud en esa zona.
 
-    col_widths = {
-        "InstanceType": 20,
-        "vCPUs": 7,
-        "MemoryMiB": 11,
-        "TotalZonas": 11,
-        "ZonasDisponibles": 50,
+    Retorna {zona -> "disponible" | "sin_capacidad" | "error: <msg>"}.
+    """
+    resultado: dict[str, str] = {}
+
+    for zona in zonas:
+        try:
+            ec2_client.create_capacity_reservation(
+                InstanceType=tipo,
+                InstancePlatform="Linux/UNIX",
+                AvailabilityZone=zona,
+                InstanceCount=1,
+                Tenancy="default",
+                EndDateType="unlimited",
+                DryRun=True,
+            )
+            # Si no lanza excepción (improbable con DryRun=True), marcar disponible
+            resultado[zona] = "disponible"
+        except ClientError as exc:
+            code = exc.response["Error"]["Code"]
+            if code == "DryRunOperation":
+                # DryRunOperation significa que el request hubiera sido exitoso
+                resultado[zona] = "disponible"
+            elif code == "InsufficientCapacityError":
+                resultado[zona] = "sin_capacidad"
+            else:
+                resultado[zona] = f"error: {code}"
+
+    return resultado
+
+
+# ---------------------------------------------------------------------------
+# Función principal de negocio
+# ---------------------------------------------------------------------------
+
+
+def consultar_capacidad(
+    session: boto3.Session,
+    tipo_ec2: str,
+    verificar_capacidad: bool = False,
+) -> dict[str, Any]:
+    """
+    Consulta especificaciones y disponibilidad de una familia o tipo de instancia EC2.
+
+    Args:
+        session:             Sesión boto3 activa.
+        tipo_ec2:            Familia (m5) o tipo exacto (m5.large).
+        verificar_capacidad: Si True, realiza dry-run por zona para verificar
+                             capacidad real.
+
+    Returns:
+        Dict serializable con región, tipos consultados y sus detalles.
+    """
+    ec2 = session.client("ec2")
+    region = session.region_name or "desconocida"
+
+    logger.info("Expandiendo '%s' en la región '%s'…", tipo_ec2, region)
+    tipos = _expandir_familia(ec2, tipo_ec2)
+
+    if not tipos:
+        return {
+            "region": region,
+            "tipoEC2_consultado": tipo_ec2,
+            "total_tipos": 0,
+            "tipos": [],
+        }
+
+    logger.info("Tipos encontrados: %s", tipos)
+    specs = _obtener_especificaciones(ec2, tipos)
+    zonas_por_tipo = _obtener_zonas(ec2, tipos)
+
+    tipos_resultado: list[dict[str, Any]] = []
+
+    for tipo in sorted(tipos):
+        zonas = zonas_por_tipo.get(tipo, [])
+        entrada: dict[str, Any] = {
+            "tipo": tipo,
+            "especificaciones": specs.get(tipo, {}),
+            "zonas_disponibles": zonas,
+            "total_zonas": len(zonas),
+        }
+
+        if verificar_capacidad:
+            if zonas:
+                entrada["capacidad_por_zona"] = _verificar_capacidad_por_zona(ec2, tipo, zonas)
+            else:
+                entrada["capacidad_por_zona"] = {}
+
+        tipos_resultado.append(entrada)
+
+    return {
+        "region": region,
+        "tipoEC2_consultado": tipo_ec2,
+        "total_tipos": len(tipos_resultado),
+        "tipos": tipos_resultado,
     }
-    header = "  ".join(k.ljust(v) for k, v in col_widths.items())
-    sep = "  ".join("-" * v for v in col_widths.values())
-    print(header)
-    print(sep)
-    for row in results:
-        line = "  ".join(str(row[k]).ljust(v) for k, v in col_widths.items())
-        print(line)
 
-    print(f"\nTotal: {len(results)} tipo(s) de instancia")
+
+# ---------------------------------------------------------------------------
+# Serialización y salida
+# ---------------------------------------------------------------------------
+
+
+def serializar(datos: dict[str, Any], formato: str) -> str:
+    """Serializa el resultado a JSON o YAML."""
+    if formato == "yaml":
+        result: str = yaml.safe_dump(datos, allow_unicode=True, sort_keys=False)
+        return result
+    return json.dumps(datos, indent=2, ensure_ascii=False, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Punto de entrada CLI
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Consulta capacidad disponible de tipos de instancia EC2"
+        description="Consulta capacidad e información de tipos de instancia EC2",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--profile", default=None, help="Perfil AWS CLI")
-    parser.add_argument("--region", default="us-east-1", help="Región AWS")
+    parser.add_argument("--profile", default=None, help="Perfil AWS CLI (IAM Identity Center)")
+    parser.add_argument("--region", default="us-east-1", help="Región AWS (default: us-east-1)")
     parser.add_argument(
-        "--instance-type",
-        dest="instance_types",
-        nargs="+",
-        metavar="TYPE",
-        default=None,
-        help="Uno o más tipos de instancia (ej: t3.medium m5.large). Omitir para consultar todos.",
+        "--tipoEC2",
+        required=True,
+        metavar="TIPO_O_FAMILIA",
+        help="Familia (ej: m5) o tipo exacto (ej: m5.large)",
+    )
+    parser.add_argument(
+        "--formato",
+        choices=["json", "yaml"],
+        default="json",
+        help="Formato de salida: json (default) o yaml",
+    )
+    parser.add_argument(
+        "--verificar-capacidad",
+        action="store_true",
+        default=False,
+        help="Realiza dry-run de create_capacity_reservation por zona para "
+        "verificar capacidad real (no crea recursos)",
     )
     args = parser.parse_args()
 
@@ -133,12 +275,16 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        results = consulta_capacidad(session, instance_types=args.instance_types)
+        resultado = consultar_capacidad(
+            session,
+            tipo_ec2=args.tipoEC2,
+            verificar_capacidad=args.verificar_capacidad,
+        )
     except (BotoCoreError, ClientError) as exc:
         logger.error("Error al consultar capacidad EC2: %s", exc)
         sys.exit(1)
 
-    _print_table(results)
+    print(serializar(resultado, args.formato))
 
 
 if __name__ == "__main__":
