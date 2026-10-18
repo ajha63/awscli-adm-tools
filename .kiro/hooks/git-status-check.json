@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Git Status Check al iniciar sesión",
+      "trigger": "SessionStart",
+      "description": "Al iniciar sesión, ejecuta git status y notifica al desarrollador si hay cambios sin commitear o commits sin pushear antes de comenzar una nueva tarea.",
+      "action": {
+        "type": "command",
+        "command": "cd \"$KIRO_WORKSPACE_PATH\" 2>/dev/null || cd \"$(git rev-parse --show-toplevel 2>/dev/null)\" || exit 0\n\n# Verificar que es un repositorio git\ngit rev-parse --git-dir > /dev/null 2>&1 || exit 0\n\nBRANCH=$(git branch --show-current 2>/dev/null || echo \"desconocida\")\nSTATUS=$(git status --porcelain 2>/dev/null)\nUNPUSHED=$(git log @{u}.. --oneline 2>/dev/null | wc -l | tr -d ' ')\nSTASHES=$(git stash list 2>/dev/null | wc -l | tr -d ' ')\n\n# Construir mensaje para el agente\nMSG=\"=== ESTADO DEL REPOSITORIO (inicio de sesión) ===\\n\"\nMSG+=\"Rama activa: $BRANCH\\n\"\n\nif [ -z \"$STATUS\" ]; then\n  MSG+=\"Árbol de trabajo: LIMPIO ✓\\n\"\nelse\n  MODIFIED=$(echo \"$STATUS\" | grep -c '^ M\\|^M ' 2>/dev/null || echo 0)\n  UNTRACKED=$(echo \"$STATUS\" | grep -c '^??' 2>/dev/null || echo 0)\n  STAGED=$(echo \"$STATUS\" | grep -c '^[ADMR]' 2>/dev/null || echo 0)\n  MSG+=\"Árbol de trabajo: CON CAMBIOS PENDIENTES ⚠️\\n\"\n  MSG+=\"  - Archivos modificados sin commitear: $MODIFIED\\n\"\n  MSG+=\"  - Archivos staged listos para commit: $STAGED\\n\"\n  MSG+=\"  - Archivos sin trackear: $UNTRACKED\\n\"\nfi\n\nif [ \"$UNPUSHED\" -gt 0 ] 2>/dev/null; then\n  MSG+=\"Commits locales sin pushear: $UNPUSHED ⚠️\\n\"\nelse\n  MSG+=\"Commits locales sin pushear: ninguno ✓\\n\"\nfi\n\nif [ \"$STASHES\" -gt 0 ] 2>/dev/null; then\n  MSG+=\"Stashes guardados: $STASHES (revisar con 'git stash list')\\n\"\nfi\n\nMSG+=\"\\n\"\n\nif [ -n \"$STATUS\" ] || [ \"$UNPUSHED\" -gt 0 ] 2>/dev/null; then\n  MSG+=\"⚠️  ACCIÓN REQUERIDA ANTES DE INICIAR UNA TAREA NUEVA:\\n\"\n  MSG+=\"  1. Commitea o haz stash de los cambios pendientes.\\n\"\n  MSG+=\"  2. Sube los commits locales con: git push\\n\"\n  MSG+=\"  3. Confirma el estado limpio con: git status\\n\"\n  MSG+=\"Informa al desarrollador de estos pendientes antes de comenzar cualquier trabajo nuevo.\"\nelse\n  MSG+=\"Repositorio listo. Puedes iniciar una nueva tarea.\"\nfi\n\nprintf \"$MSG\"\n",
+        "timeout": 15
+      }
+    }
+  ]
+}

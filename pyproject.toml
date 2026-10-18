@@ -1,0 +1,59 @@
+[project]
+name = "aws-adm-script"
+version = "0.1.0"
+description = "Scripts de administración de recursos y servicios AWS con boto3"
+readme = "README.md"
+authors = [
+    { name = "ajha63", email = "hernandez.alvaro@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "boto3>=1.43.114",
+    "botocore>=1.43.114",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+aws-adm-script = "aws_adm_script:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "boto3-stubs[essential]>=1.43.114",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.1",
+]
+
+# ── Ruff: linter + formatter ──────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aws_adm_script"]
+
+# ── Mypy: type checking ───────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+plugins = []
+
+# ── Pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=src/aws_adm_script --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/aws_adm_script"]
+omit = ["tests/*"]

@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# =============================================================================
+# pre-commit: escáner de secretos y credenciales AWS
+# Compatible con macOS (BSD grep) y Linux.
+# Bloquea el commit si detecta patrones de credenciales en archivos staged.
+# =============================================================================
+
+set -euo pipefail
+
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+ERRORS=0
+WARNINGS=0
+
+# Archivos staged (solo los que existen o se modificaron, excluye borrados)
+STAGED=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)
+
+if [[ -z "$STAGED" ]]; then
+  exit 0
+fi
+
+# ── 1. Archivos que nunca deben commitearse ───────────────────────────────────
+BLOCKED_FILENAMES=(
+  ".env"
+  "credentials"
+  "credentials.json"
+  "secrets.json"
+  "secrets.yaml"
+  "secrets.yml"
+  "cdk.context.json"
+  "samconfig.toml"
+  "token.json"
+  "vault-token"
+)
+
+while IFS= read -r file; do
+  [[ -z "$file" ]] && continue
+  base=$(basename "$file")
+
+  for blocked in "${BLOCKED_FILENAMES[@]}"; do
+    if [[ "$base" == "$blocked" ]]; then
+      echo -e "${RED}[BLOQUEADO]${NC} Archivo sensible en staging: $file"
+      ERRORS=$((ERRORS + 1))
+    fi
+  done
+
+  # Extensiones de certificados y claves
+  case "$base" in
+    *.pem|*.key|*.p12|*.pfx|*.crt|*.cer|*_rsa|*_ed25519)
+      echo -e "${RED}[BLOQUEADO]${NC} Certificado/clave privada en staging: $file"
+      ERRORS=$((ERRORS + 1))
+      ;;
+    *.env.local|*.env.development|*.env.production|*.env.test|*.env.staging)
+      echo -e "${RED}[BLOQUEADO]${NC} Archivo .env de entorno específico en staging: $file"
+      ERRORS=$((ERRORS + 1))
+      ;;
+  esac
+done <<< "$STAGED"
+
+# ── 2. Escaneo de contenido con Python (compatible macOS/Linux) ───────────────
+# Python maneja regex PCRE y es universal. Más fiable que grep -P en macOS.
+
+SCANNER_RESULT=$(python3 - "$STAGED" <<'PYEOF'
+import re
+import subprocess
+import sys
+
+# Patrones: (descripción, regex)
+PATTERNS = [
+    ("AWS Access Key ID",        r"AKIA[0-9A-Z]{16}"),
+    ("AWS Secret Access Key",    r"(?i)aws_secret_access_key\s*[=:]\s*['\"]?[A-Za-z0-9/+]{40}['\"]?"),
+    ("AWS Session Token",        r"(?i)aws_session_token\s*[=:]\s*['\"]?[A-Za-z0-9/+=]{50,}['\"]?"),
+    ("Clave privada PEM",        r"-----BEGIN\s+(RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    ("Contraseña hardcodeada",   r"(?i)(password|passwd|pwd)\s*=\s*['\"][^'\"]{4,}['\"]"),
+    ("Token/API Key genérico",   r"(?i)(api_key|apikey|auth_token|secret_key|access_token|client_secret)\s*=\s*['\"][^'\"]{8,}['\"]"),
+    ("JWT token",                r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    ("Slack token",              r"xox[baprs]-[0-9A-Za-z]{10,}"),
+    ("GitHub token",             r"gh[pousr]_[A-Za-z0-9]{36,}"),
+    ("Private key header",       r"-----BEGIN PRIVATE KEY-----"),
+]
+
+# Archivos a ignorar en el escaneo de contenido (documentación, plantillas, hooks)
+SKIP_CONTENT_SCAN = {
+    ".env.example", ".gitignore", "pre-commit", "install-hooks.sh",
+    "README.md", "CHANGELOG.md", "CONTRIBUTING.md",
+}
+
+# Directorios a ignorar (steering, docs — contienen ejemplos educativos)
+SKIP_CONTENT_DIRS = {".kiro", "docs", ".githooks"}
+
+files_raw = sys.argv[1] if len(sys.argv) > 1 else ""
+files = [f.strip() for f in files_raw.splitlines() if f.strip()]
+
+errors = 0
+for filepath in files:
+    if any(filepath.endswith(skip) or filepath == skip for skip in SKIP_CONTENT_SCAN):
+        continue
+    if any(filepath.startswith(d + "/") or filepath.startswith(d + "\\") for d in SKIP_CONTENT_DIRS):
+        continue
+    # Solo archivos de texto relevantes
+    if not re.search(r'\.(py|sh|env|json|yaml|yml|toml|cfg|ini|tf|ts|js|md|txt|conf)$', filepath):
+        continue
+
+    try:
+        result = subprocess.run(
+            ["git", "show", f":{filepath}"],
+            capture_output=True, text=True, errors="replace"
+        )
+        content = result.stdout
+    except Exception:
+        continue
+
+    for description, pattern in PATTERNS:
+        matches = re.findall(pattern, content)
+        if matches:
+            print(f"BLOCKED|{filepath}|{description}")
+            errors += 1
+            break  # Un error por archivo es suficiente para no saturar
+
+sys.exit(0)
+PYEOF
+)
+
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  IFS='|' read -r status filepath description <<< "$line"
+  if [[ "$status" == "BLOCKED" ]]; then
+    echo -e "${RED}[BLOQUEADO]${NC} Posible secreto en '$filepath': $description"
+    ERRORS=$((ERRORS + 1))
+  fi
+done <<< "$SCANNER_RESULT"
+
+# ── 3. Advertencia si .env.example contiene valores que parecen reales ────────
+while IFS= read -r file; do
+  [[ "$file" != *".env.example" ]] && continue
+
+  content=$(git show ":$file" 2>/dev/null || true)
+  # Líneas con valor asignado que no sean placeholder, comentario o valor conocido-seguro
+  suspicious=$(echo "$content" | grep -E '^[A-Z_]+=[^<#$]' \
+    | grep -vE '(REGION|ACCOUNT_ID|PROFILE|LOG_LEVEL|DEBUG|INFO|WARNING|ERROR|us-east|us-west|eu-west|alhernan|554982632606)' \
+    | grep -vE '=$' \
+    || true)
+
+  if [[ -n "$suspicious" ]]; then
+    echo -e "${YELLOW}[ADVERTENCIA]${NC} .env.example puede contener valores reales:"
+    echo "$suspicious" | sed -E 's/=.+/=***OCULTO***/'
+    WARNINGS=$((WARNINGS + 1))
+  fi
+done <<< "$STAGED"
+
+# ── Resultado final ────────────────────────────────────────────────────────────
+echo ""
+if [[ $ERRORS -gt 0 ]]; then
+  echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "${RED}  COMMIT BLOQUEADO — $ERRORS problema(s) de seguridad detectado(s)${NC}"
+  echo -e "${RED}  Elimina las credenciales antes de commitear.${NC}"
+  echo -e "${RED}  Falso positivo confirmado? usa: git commit --no-verify${NC}"
+  echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  exit 1
+fi
+
+if [[ $WARNINGS -gt 0 ]]; then
+  echo -e "${YELLOW}  $WARNINGS advertencia(s) — revisa antes de continuar.${NC}"
+fi
+
+echo -e "${GREEN}✓ Escaneo de secretos OK — ningún problema detectado.${NC}"
+exit 0

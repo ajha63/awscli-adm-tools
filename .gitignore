@@ -1,0 +1,101 @@
+# =============================================================================
+# SECRETOS Y CREDENCIALES — NUNCA en Git
+# =============================================================================
+
+# Archivos .env (se permite solo el template sin valores reales)
+.env
+.env.*
+!.env.example
+
+# Certificados y claves privadas
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*_rsa
+*_rsa.pub
+*_ed25519
+*_ed25519.pub
+
+# Archivos de secretos por nombre
+credentials
+credentials.json
+secrets.json
+secrets.yaml
+secrets.yml
+token.json
+vault-token
+.secret
+.secrets/
+*_credentials.json
+service-account*.json
+
+# AWS — archivos que pueden contener IDs de cuenta, ARNs o tokens
+.aws/
+cdk.context.json
+samconfig.toml
+aws-exports.js
+
+# =============================================================================
+# PYTHON
+# =============================================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+wheels/
+eggs/
+.eggs/
+
+# =============================================================================
+# ENTORNOS VIRTUALES
+# =============================================================================
+
+.venv/
+venv/
+env/
+ENV/
+
+# =============================================================================
+# HERRAMIENTAS DE CALIDAD
+# =============================================================================
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# =============================================================================
+# AWS SDK / IaC
+# =============================================================================
+
+.aws-sam/
+.cdk.staging/
+cdk.out/
+.dynamodb/
+
+# =============================================================================
+# IDEs
+# =============================================================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =============================================================================
+# macOS / Sistema
+# =============================================================================
+
+.DS_Store
+Thumbs.db
