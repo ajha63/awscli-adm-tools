@@ -8,7 +8,7 @@ Construido sobre Python 3.14 y boto3.
 
 - [uv](https://docs.astral.sh/uv/) ≥ 0.4
 - AWS CLI configurado con IAM Identity Center (SSO)
-- Perfil `alhernan` (o el que configures en `.env`)
+- Perfil `johndoe` (o el que configures en `.env`)
 
 ## Configuración inicial
 
@@ -24,7 +24,7 @@ cp .env.example .env
 uv sync
 
 # 4. Autenticarte con SSO
-aws sso login --profile alhernan
+aws sso login --profile johndoe
 ```
 
 ## Uso de scripts
